@@ -342,7 +342,13 @@ sudo ./memguard.py --keep   # keep dump for further analysis
 ```
 
 ---
+🚀 How to Use the New --auditd Feature
+# Save your current audit.rules
+sudo cat /etc/audit/audit.rules > audit.rules
+# Or if you have a custom path
 
+# Run the audit
+python3 configvet.py --auditd audit.rules
 ## License & Disclaimer
 
 This tool is provided "as is" for security professionals and engineers. Always ensure you have authorisation to audit the configurations you supply. The authors assume no liability for misuse or mis-interpretation of results.
