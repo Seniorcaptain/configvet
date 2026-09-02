@@ -3,7 +3,8 @@
 configvet.py - Universal Security Configuration Auditor
 Audits: iptables, nftables, ModSecurity, Sigma, capa,
         AWS SGs, Azure NSGs, GCP Firewall, CloudFormation,
-        Terraform, Kubernetes Network Policies, Elastic, Splunk ES.
+        Terraform, Kubernetes Network Policies, Elastic, Splunk ES,
+        and Linux auditd (STIG) rules.
 """
 
 import os
@@ -310,11 +311,9 @@ class AzureNsgAuditor:
     def audit(self):
         if not self.data:
             return self.issues
-        # Handle both single NSG and list
         nsgs = self.data if isinstance(self.data, list) else [self.data]
         for nsg in nsgs:
             nsg_name = nsg.get('name', 'unknown')
-            # Check properties.securityRules
             rules = nsg.get('properties', {}).get('securityRules', [])
             for rule in rules:
                 if rule.get('properties', {}).get('access') == 'Allow':
@@ -402,7 +401,6 @@ class CloudFormationAuditor:
                             f"{RED}[!] CFN {sg_name}: Ingress from 0.0.0.0/0 - {ip_protocol}:{port_str}{RESET}"
                         )
             elif res_type == 'AWS::EC2::SecurityGroupIngress':
-                # Individual ingress rules
                 cidr = res_body.get('Properties', {}).get('CidrIp')
                 if cidr == '0.0.0.0/0':
                     self.issues.append(
@@ -426,7 +424,6 @@ class TerraformAuditor:
             except Exception as e:
                 self.issues.append(f"{RED}[!] hcl2 parse error: {e}{RESET}")
         else:
-            # Fallback: treat as raw text and regex
             self.data = {"raw": self.content}
         return self
 
@@ -456,7 +453,6 @@ class TerraformAuditor:
                                 f"{RED}[!] Terraform SG rule {name}: from 0.0.0.0/0{RESET}"
                             )
         else:
-            # Regex fallback
             if re.search(r'cidr_blocks\s*=\s*\[.*"0\.0\.0\.0/0"', self.content):
                 self.issues.append(f"{RED}[!] Terraform: Found 0.0.0.0/0 in security group rules{RESET}")
         return self.issues
@@ -485,10 +481,8 @@ class K8sNetworkPolicyAuditor:
                 spec = doc.get('spec', {})
                 pod_selector = spec.get('podSelector', {})
                 policy_types = spec.get('policyTypes', [])
-                # Check if policy is default deny
                 if not policy_types:
                     self.issues.append(f"{BLUE}[*] No policyTypes set for {doc.get('metadata', {}).get('name')}{RESET}")
-                # Check ingress rules
                 for ingress in spec.get('ingress', []):
                     for rule in ingress.get('from', []):
                         ip_block = rule.get('ipBlock', {})
@@ -496,7 +490,6 @@ class K8sNetworkPolicyAuditor:
                             self.issues.append(
                                 f"{RED}[!] NetworkPolicy {doc['metadata']['name']}: Allows ingress from 0.0.0.0/0{RESET}"
                             )
-                # Check egress rules
                 for egress in spec.get('egress', []):
                     for rule in egress.get('to', []):
                         ip_block = rule.get('ipBlock', {})
@@ -590,6 +583,74 @@ class SplunkESAuditor:
         return self.issues
 
 # ----------------------------------------------------------------------
+# 14. LINUX AUDITD (STIG) RULES PARSER & ANALYZER - NEW
+# ----------------------------------------------------------------------
+class AuditdAuditor:
+    """Audit Linux audit.rules against STIG requirements (SKRZ Blue Team)."""
+    def __init__(self, content):
+        self.content = content
+        self.lines = content.splitlines()
+        self.issues = []
+
+    def parse(self):
+        # Strip comments and empty lines
+        self.rules = [ln for ln in self.lines if ln.strip() and not ln.strip().startswith('#')]
+        return self
+
+    def audit(self):
+        # Define required rule patterns (STIG V-IDs from SKRZ page)
+        required = [
+            {
+                "pattern": r"-w /etc/group",
+                "msg": "STIG V-258176: /etc/group writes should be monitored"
+            },
+            {
+                "pattern": r"-w /etc/passwd",
+                "msg": "STIG V-258176: /etc/passwd writes should be monitored"
+            },
+            {
+                "pattern": r"-w /etc/shadow",
+                "msg": "STIG V-258176: /etc/shadow writes should be monitored"
+            },
+            {
+                "pattern": r"-w /etc/sudoers",
+                "msg": "STIG V-258176: /etc/sudoers writes should be monitored"
+            },
+            {
+                "pattern": r"-a always,exit -S adjtimex",
+                "msg": "STIG V-258205: adjtimex syscall should be audited"
+            },
+            {
+                "pattern": r"-a always,exit -S settimeofday",
+                "msg": "STIG V-258205: settimeofday syscall should be audited"
+            },
+            {
+                "pattern": r"-a always,exit -S execve.*-F.*uid>=1000",
+                "msg": "STIG V-258206: execve for users should be audited"
+            },
+            {
+                "pattern": r"-a always,exit -S init_module",
+                "msg": "STIG V-258207: module loading should be audited"
+            },
+            {
+                "pattern": r"-a always,exit -S delete_module",
+                "msg": "STIG V-258207: module unloading should be audited"
+            },
+            # Add more as needed
+        ]
+
+        rule_text = "\n".join(self.rules)
+        for req in required:
+            if not re.search(req["pattern"], rule_text, re.MULTILINE):
+                self.issues.append(f"{YELLOW}[!] Missing rule: {req['msg']}{RESET}")
+
+        # Check overall auditd is running (optional)
+        if not any("audit" in ln for ln in self.rules):
+            self.issues.append(f"{RED}[!] Auditd may not be configured (no audit rules found){RESET}")
+
+        return self.issues
+
+# ----------------------------------------------------------------------
 # MAIN CONTROLLER
 # ----------------------------------------------------------------------
 class ConfigVet:
@@ -624,12 +685,14 @@ class ConfigVet:
             self.report.append(("Elastic Detection", self._audit_elastic()))
         if self.args.splunk_es:
             self.report.append(("Splunk ES", self._audit_splunk_es()))
+        if self.args.auditd:
+            self.report.append(("auditd (STIG)", self._audit_auditd()))
 
         if not self.report:
             print("No input files specified. Available options:")
             print("  --iptables, --nftables, --modsec, --sigma, --capa,")
             print("  --aws-sg, --azure-nsg, --gcp-firewall, --cloudformation,")
-            print("  --terraform, --k8s-network, --elastic, --splunk_es")
+            print("  --terraform, --k8s-network, --elastic, --splunk_es, --auditd")
             sys.exit(1)
 
         self.print_report()
@@ -707,6 +770,11 @@ class ConfigVet:
         auditor.parse()
         return auditor.audit()
 
+    def _audit_auditd(self):
+        auditor = AuditdAuditor(self._read_file(self.args.auditd))
+        auditor.parse()
+        return auditor.audit()
+
     def print_report(self):
         print("\n" + "=" * 80)
         print(f"{BOLD}{BLUE}CONFIGURATION VET REPORT{RESET}")
@@ -746,6 +814,7 @@ def main():
     parser.add_argument("--k8s-network", help="Kubernetes NetworkPolicy YAML")
     parser.add_argument("--elastic", help="Elastic detection rule JSON")
     parser.add_argument("--splunk_es", help="Splunk ES savedsearches.conf")
+    parser.add_argument("--auditd", help="Linux audit.rules file (STIG validation)")
     args = parser.parse_args()
 
     vet = ConfigVet(args)
