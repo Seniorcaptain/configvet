@@ -5,6 +5,7 @@ Audits: iptables, nftables, ModSecurity, Sigma, capa,
         AWS SGs, Azure NSGs, GCP Firewall, CloudFormation,
         Terraform, Kubernetes Network Policies, Elastic, Splunk ES,
         Linux auditd, and full XCCDF STIG compliance.
+Now supports audit profiles via --profile YAML.
 """
 
 import os
@@ -617,7 +618,7 @@ class AuditdAuditor:
         return self.issues
 
 # ----------------------------------------------------------------------
-# 15. STIG XCCDF AUDITOR (NEW)
+# 15. STIG XCCDF AUDITOR
 # ----------------------------------------------------------------------
 class StigXmlAuditor:
     """Parse XCCDF STIG XML and check compliance against a target config."""
@@ -716,14 +717,32 @@ class StigXmlAuditor:
         return "\n".join(output)
 
 # ----------------------------------------------------------------------
-# MAIN CONTROLLER
+# MAIN CONTROLLER (with profile support)
 # ----------------------------------------------------------------------
 class ConfigVet:
     def __init__(self, args):
         self.args = args
         self.report = []
+        self.profile_data = {}
+
+    def load_profile(self, profile_path):
+        """Load YAML profile and convert keys to command-line style."""
+        try:
+            with open(profile_path, 'r') as f:
+                self.profile_data = yaml.safe_load(f)
+        except Exception as e:
+            print(f"{RED}[!] Failed to load profile: {e}{RESET}")
+            sys.exit(1)
+
+        # Set attributes on self.args if not already set
+        for key, value in self.profile_data.items():
+            if value and not getattr(self.args, key, None):
+                setattr(self.args, key, value)
 
     def run(self):
+        if self.args.profile:
+            self.load_profile(self.args.profile)
+
         if self.args.iptables:
             self.report.append(("iptables", self._audit_iptables()))
         if self.args.nftables:
@@ -771,6 +790,7 @@ class ConfigVet:
             print("  --aws-sg, --azure-nsg, --gcp-firewall, --cloudformation,")
             print("  --terraform, --k8s-network, --elastic, --splunk_es, --auditd")
             print("  --stig-xml FILE [--target-config FILE] [--stig-list]")
+            print("  --profile FILE  (YAML file with keys = flags, values = paths)")
             sys.exit(1)
 
         self.print_report()
@@ -899,6 +919,7 @@ def main():
     parser.add_argument("--stig-xml", help="XCCDF STIG XML file (from DISA)")
     parser.add_argument("--target-config", help="Configuration file to check against STIG")
     parser.add_argument("--stig-list", action="store_true", help="List all rules from STIG XML and exit")
+    parser.add_argument("--profile", help="YAML profile file with audit paths")
     args = parser.parse_args()
 
     vet = ConfigVet(args)
